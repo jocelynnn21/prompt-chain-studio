@@ -3,8 +3,8 @@ import type { Step } from "@/lib/types";
 
 export const maxDuration = 300;
 
-function outputText(payload: { output?: { content?: { type?: string; text?: string }[] }[] }) {
-  return payload.output?.flatMap(item => item.content ?? []).filter(item => item.type === "output_text").map(item => item.text ?? "").join("\n").trim() ?? "";
+function outputText(payload: { output_text?: string; output?: { content?: { type?: string; text?: string }[] }[] }) {
+  return payload.output_text?.trim() || payload.output?.flatMap(item => item.content ?? []).filter(item => item.type === "output_text").map(item => item.text ?? "").join("\n").trim() || "";
 }
 
 export async function POST(request: Request) {
@@ -29,7 +29,8 @@ export async function POST(request: Request) {
   const { data: models } = modelIds.length
     ? await supabase.from("llm_models").select("id,provider_model_id").in("id", modelIds)
     : { data: [] as { id: number; provider_model_id: string }[] };
-  if (!process.env.OPENAI_API_KEY) return Response.json({ error: "OPENAI_API_KEY is not configured on this deployment." }, { status: 503 });
+  const gatewayToken = process.env.AI_GATEWAY_API_KEY || process.env.VERCEL_OIDC_TOKEN;
+  if (!gatewayToken) return Response.json({ error: "AI Gateway authentication is not configured on this deployment." }, { status: 503 });
   const { data: run, error: runError } = await supabase.from("prompt_chain_runs").insert({ humor_flavor_id: chainId, profile_id: user.id, input_text: text || null, input_image_url: imageUrl || null }).select("id").single();
   if (runError || !run) return Response.json({ error: runError?.message ?? "Could not create run." }, { status: 500 });
   const outputs: { step_id: number; description: string; output: string }[] = [];
@@ -41,10 +42,13 @@ export async function POST(request: Request) {
       ];
       if (index === 0 && imageUrl) content.push({ type: "input_image", image_url: imageUrl });
       const selectedModel = models?.find(model => model.id === step.llm_model_id)?.provider_model_id;
-      const model = selectedModel || process.env.OPENAI_MODEL || "gpt-4.1-mini";
-      const result = await fetch("https://api.openai.com/v1/responses", {
+      const model = selectedModel?.includes("/") ? selectedModel
+        : selectedModel?.startsWith("gpt-") ? `openai/${selectedModel}`
+        : selectedModel?.startsWith("gemini-") ? `google/${selectedModel}`
+        : process.env.AI_GATEWAY_MODEL || "google/gemini-3.6-flash";
+      const result = await fetch("https://ai-gateway.vercel.sh/v1/responses", {
         method: "POST",
-        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${gatewayToken}`, "Content-Type": "application/json" },
         body: JSON.stringify({ model, instructions: step.llm_system_prompt || "Follow the user's instructions precisely. Return only the requested result.", input: [{ role: "user", content }], max_output_tokens: 1000, ...(step.llm_temperature !== null && /^gpt-/i.test(model) ? { temperature: step.llm_temperature } : {}) }),
         signal: AbortSignal.timeout(45000),
       });
