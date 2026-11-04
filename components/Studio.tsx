@@ -91,7 +91,7 @@ export default function Studio({ initialChains, initialSteps, initialRuns, model
     try {
       const payload = { ...stepDraft, description: stepDraft.description?.trim() || null, llm_system_prompt: stepDraft.llm_system_prompt?.trim() || null, llm_user_prompt: stepDraft.llm_user_prompt.trim(), modified_datetime_utc: new Date().toISOString() };
       const result = stepEditor === "new"
-        ? await supabase.from("humor_flavor_steps").insert({ ...payload, humor_flavor_id: selected.id, order_by: chainSteps.length + 1 }).select("*").single()
+        ? await supabase.from("humor_flavor_steps").insert({ ...payload, humor_flavor_id: selected.id, order_by: Math.max(0, ...chainSteps.map(step => step.order_by)) + 1 }).select("*").single()
         : await supabase.from("humor_flavor_steps").update(payload).eq("id", stepEditor.id).select("*").single();
       if (result.error) throw result.error;
       const step = result.data as Step;
