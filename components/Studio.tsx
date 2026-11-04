@@ -20,6 +20,7 @@ export default function Studio({ initialChains, initialSteps, initialRuns, model
   const [creatingChain, setCreatingChain] = useState(false);
   const [stepEditor, setStepEditor] = useState<Step | "new" | null>(null);
   const [stepDraft, setStepDraft] = useState<StepDraft>(blankStep);
+  const [stepError, setStepError] = useState<string | null>(null);
   const [textInput, setTextInput] = useState("");
   const [imageUrl, setImageUrl] = useState("");
   const [busy, setBusy] = useState(false);
@@ -49,7 +50,11 @@ export default function Studio({ initialChains, initialSteps, initialRuns, model
     setSelectedId(chain.id); setChainDraft({ slug: chain.slug, description: chain.description ?? "" });
     setEditingChain(false); setCreatingChain(false); setStepEditor(null); setNotice(null);
   }
-  function fail(error: unknown) { setNotice(error instanceof Error ? error.message : String(error)); }
+  function errorMessage(error: unknown) {
+    if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message;
+    return String(error);
+  }
+  function fail(error: unknown) { setNotice(errorMessage(error)); }
   function beginCreateChain() { setCreatingChain(true); setEditingChain(true); setChainDraft({ slug: "", description: "" }); setStepEditor(null); }
   async function saveChain() {
     const slug = chainDraft.slug.trim();
@@ -82,12 +87,13 @@ export default function Studio({ initialChains, initialSteps, initialRuns, model
   }
   function openStep(step: Step | "new") {
     setStepEditor(step);
+    setStepError(null);
     setStepDraft(step === "new" ? blankStep : { description: step.description ?? "", llm_system_prompt: step.llm_system_prompt ?? "", llm_user_prompt: step.llm_user_prompt ?? "", llm_model_id: step.llm_model_id, llm_temperature: step.llm_temperature, is_hidden: step.is_hidden });
   }
   async function saveStep() {
     if (!selected || !stepEditor) return;
-    if (!stepDraft.llm_user_prompt?.trim()) { setNotice("Add an instruction for this step."); return; }
-    setBusy(true); setNotice(null);
+    if (!stepDraft.llm_user_prompt?.trim()) { setStepError("Add a prompt instruction before saving this step."); return; }
+    setBusy(true); setNotice(null); setStepError(null);
     try {
       const payload = { ...stepDraft, description: stepDraft.description?.trim() || null, llm_system_prompt: stepDraft.llm_system_prompt?.trim() || null, llm_user_prompt: stepDraft.llm_user_prompt.trim(), modified_datetime_utc: new Date().toISOString() };
       const result = stepEditor === "new"
@@ -97,7 +103,7 @@ export default function Studio({ initialChains, initialSteps, initialRuns, model
       const step = result.data as Step;
       setSteps(previous => stepEditor === "new" ? [...previous, step] : previous.map(item => item.id === step.id ? step : item));
       setStepEditor(null); setNotice(stepEditor === "new" ? "Step added." : "Step updated.");
-    } catch (error) { fail(error); } finally { setBusy(false); }
+    } catch (error) { setStepError(errorMessage(error)); } finally { setBusy(false); }
   }
   async function deleteStep(step: Step) {
     if (!window.confirm(`Delete step ${step.order_by}?`)) return;
@@ -153,6 +159,6 @@ export default function Studio({ initialChains, initialSteps, initialRuns, model
       </> : <div className="empty-card"><div className="empty-icon">✦</div><h4>Your workspace is ready</h4><p>Create a chain to start building a sequence of prompts.</p><button className="primary" onClick={beginCreateChain}>Create a chain →</button></div>}
       </div>
     </main>
-    {stepEditor && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setStepEditor(null); }}><section className="step-modal" role="dialog" aria-modal="true" aria-labelledby="step-modal-title"><div className="modal-header"><div><p className="eyebrow">{stepEditor === "new" ? "CREATE / STEP" : "EDIT / STEP"}</p><h2 id="step-modal-title">{stepEditor === "new" ? "Add a prompt step" : "Edit prompt step"}</h2></div><button className="icon-button" aria-label="Close" onClick={() => setStepEditor(null)}><X size={20}/></button></div><div className="modal-fields"><label>Step name<input autoFocus value={stepDraft.description ?? ""} onChange={event => setStepDraft({ ...stepDraft, description: event.target.value })} placeholder="e.g. Describe the image"/></label><label>System instruction<textarea rows={3} value={stepDraft.llm_system_prompt ?? ""} onChange={event => setStepDraft({ ...stepDraft, llm_system_prompt: event.target.value })} placeholder="Set the role and style for this step…"/></label><label>Prompt instruction <span className="required">*</span><textarea rows={5} value={stepDraft.llm_user_prompt ?? ""} onChange={event => setStepDraft({ ...stepDraft, llm_user_prompt: event.target.value })} placeholder="What should this step do with the input?"/></label><div className="field-row"><label>Model reference<select value={stepDraft.llm_model_id ?? ""} onChange={event => setStepDraft({ ...stepDraft, llm_model_id: event.target.value ? Number(event.target.value) : null })}><option value="">Default model</option>{models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label><label>Temperature<input type="number" min="0" max="2" step="0.1" value={stepDraft.llm_temperature ?? ""} onChange={event => setStepDraft({ ...stepDraft, llm_temperature: event.target.value ? Number(event.target.value) : null })} placeholder="Default"/></label></div><label className="checkbox-label"><input type="checkbox" checked={stepDraft.is_hidden} onChange={event => setStepDraft({ ...stepDraft, is_hidden: event.target.checked })}/><span>Pause this step during generation</span></label></div><div className="modal-footer"><button className="outline" onClick={() => setStepEditor(null)}>Cancel</button><button className="primary" disabled={busy} onClick={saveStep}><Save size={16}/>{busy ? "Saving…" : "Save step"}</button></div></section></div>}
+    {stepEditor && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setStepEditor(null); }}><section className="step-modal" role="dialog" aria-modal="true" aria-labelledby="step-modal-title"><div className="modal-header"><div><p className="eyebrow">{stepEditor === "new" ? "CREATE / STEP" : "EDIT / STEP"}</p><h2 id="step-modal-title">{stepEditor === "new" ? "Add a prompt step" : "Edit prompt step"}</h2></div><button className="icon-button" aria-label="Close" onClick={() => setStepEditor(null)}><X size={20}/></button></div><div className="modal-fields"><label>Step name<input autoFocus value={stepDraft.description ?? ""} onChange={event => setStepDraft({ ...stepDraft, description: event.target.value })} placeholder="e.g. Describe the image"/></label><label>System instruction<textarea rows={3} value={stepDraft.llm_system_prompt ?? ""} onChange={event => setStepDraft({ ...stepDraft, llm_system_prompt: event.target.value })} placeholder="Set the role and style for this step…"/></label><label>Prompt instruction <span className="required">*</span><textarea rows={5} value={stepDraft.llm_user_prompt ?? ""} onChange={event => { setStepDraft({ ...stepDraft, llm_user_prompt: event.target.value }); setStepError(null); }} placeholder="What should this step do with the input?"/></label><div className="field-row"><label>Model reference<select value={stepDraft.llm_model_id ?? ""} onChange={event => setStepDraft({ ...stepDraft, llm_model_id: event.target.value ? Number(event.target.value) : null })}><option value="">Default model</option>{models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label><label>Temperature<input type="number" min="0" max="2" step="0.1" value={stepDraft.llm_temperature ?? ""} onChange={event => setStepDraft({ ...stepDraft, llm_temperature: event.target.value ? Number(event.target.value) : null })} placeholder="Default"/></label></div><label className="checkbox-label"><input type="checkbox" checked={stepDraft.is_hidden} onChange={event => setStepDraft({ ...stepDraft, is_hidden: event.target.checked })}/><span>Pause this step during generation</span></label></div><div className="modal-footer">{stepError && <p className="step-feedback" role="alert">{stepError}</p>}<button className="outline" onClick={() => setStepEditor(null)}>Cancel</button><button className="primary" disabled={busy} onClick={saveStep}><Save size={16}/>{busy ? "Saving…" : "Save step"}</button></div></section></div>}
   </div>;
 }
