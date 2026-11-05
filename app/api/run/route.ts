@@ -7,6 +7,10 @@ function outputText(payload: { output_text?: string; output?: { content?: { type
   return payload.output_text?.trim() || payload.output?.flatMap(item => item.content ?? []).filter(item => item.type === "output_text").map(item => item.text ?? "").join("\n").trim() || "";
 }
 
+function geminiText(payload: { candidates?: { content?: { parts?: { text?: string }[] } }[] }) {
+  return payload.candidates?.[0]?.content?.parts?.map(part => part.text ?? "").join("\n").trim() || "";
+}
+
 export async function POST(request: Request) {
   const { supabase, user, authorized } = await getSuperadmin();
   if (!user) return Response.json({ error: "Sign in required." }, { status: 401 });
@@ -29,16 +33,18 @@ export async function POST(request: Request) {
   const { data: models } = modelIds.length
     ? await supabase.from("llm_models").select("id,provider_model_id").in("id", modelIds)
     : { data: [] as { id: number; provider_model_id: string }[] };
+  const geminiKey = process.env.GEMINI_API_KEY;
   const gatewayToken = process.env.AI_GATEWAY_API_KEY || request.headers.get("x-vercel-oidc-token") || process.env.VERCEL_OIDC_TOKEN;
-  if (!gatewayToken) return Response.json({ error: "AI Gateway authentication is not configured on this deployment." }, { status: 503 });
+  if (!geminiKey && !gatewayToken) return Response.json({ error: "Configure GEMINI_API_KEY or AI Gateway authentication to generate ideas." }, { status: 503 });
   const { data: run, error: runError } = await supabase.from("prompt_chain_runs").insert({ humor_flavor_id: chainId, profile_id: user.id, input_text: text || null, input_image_url: imageUrl || null }).select("id").single();
   if (runError || !run) return Response.json({ error: runError?.message ?? "Could not create run." }, { status: 500 });
   const outputs: { step_id: number; description: string; output: string }[] = [];
   let previous = text;
   try {
     for (const [index, step] of steps.entries()) {
+      const promptText = `${step.llm_user_prompt || "Complete this step using the input."}\n\n${index ? "Previous step output" : "Initial input"}:\n${previous || "See attached image."}`;
       const content: ({ type: "input_text"; text: string } | { type: "input_image"; image_url: string })[] = [
-        { type: "input_text", text: `${step.llm_user_prompt || "Complete this step using the input."}\n\n${index ? "Previous step output" : "Initial input"}:\n${previous || "See attached image."}` },
+        { type: "input_text", text: promptText },
       ];
       if (index === 0 && imageUrl) content.push({ type: "input_image", image_url: imageUrl });
       const selectedModel = models?.find(model => model.id === step.llm_model_id)?.provider_model_id;
@@ -46,15 +52,35 @@ export async function POST(request: Request) {
         : selectedModel?.startsWith("gpt-") ? `openai/${selectedModel}`
         : selectedModel?.startsWith("gemini-") ? `google/${selectedModel}`
         : process.env.AI_GATEWAY_MODEL || "google/gemini-3.6-flash";
-      const result = await fetch("https://ai-gateway.vercel.sh/v1/responses", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${gatewayToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model, instructions: step.llm_system_prompt || "Follow the user's instructions precisely. Return only the requested result.", input: [{ role: "user", content }], max_output_tokens: 1000, ...(step.llm_temperature !== null && /^gpt-/i.test(model) ? { temperature: step.llm_temperature } : {}) }),
-        signal: AbortSignal.timeout(45000),
-      });
-      const payload = await result.json();
-      if (!result.ok) throw new Error(payload.error?.message || `Generation failed at step ${index + 1}.`);
-      previous = outputText(payload);
+      const directGeminiModel = !selectedModel ? "gemini-3.8-flash"
+        : model.startsWith("google/gemini-") ? model.slice("google/".length)
+        : null;
+      if (geminiKey && !imageUrl && directGeminiModel && /^gemini-[a-z0-9.-]+$/i.test(directGeminiModel)) {
+        const result = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${directGeminiModel}:generateContent`, {
+          method: "POST",
+          headers: { "x-goog-api-key": geminiKey, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: step.llm_system_prompt || "Follow the user's instructions precisely. Return only the requested result." }] },
+            contents: [{ role: "user", parts: [{ text: promptText }] }],
+            generationConfig: { maxOutputTokens: 1000, ...(step.llm_temperature !== null ? { temperature: step.llm_temperature } : {}) },
+          }),
+          signal: AbortSignal.timeout(45000),
+        });
+        const payload = await result.json();
+        if (!result.ok) throw new Error(payload.error?.message || `Generation failed at step ${index + 1}.`);
+        previous = geminiText(payload);
+      } else {
+        if (!gatewayToken) throw new Error("This step requires AI Gateway authentication. Use a Gemini model with text input to use GEMINI_API_KEY.");
+        const result = await fetch("https://ai-gateway.vercel.sh/v1/responses", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${gatewayToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ model, instructions: step.llm_system_prompt || "Follow the user's instructions precisely. Return only the requested result.", input: [{ role: "user", content }], max_output_tokens: 1000, ...(step.llm_temperature !== null && /^gpt-/i.test(model) ? { temperature: step.llm_temperature } : {}) }),
+          signal: AbortSignal.timeout(45000),
+        });
+        const payload = await result.json();
+        if (!result.ok) throw new Error(payload.error?.message || `Generation failed at step ${index + 1}.`);
+        previous = outputText(payload);
+      }
       if (!previous) throw new Error(`Step ${index + 1} returned no text.`);
       outputs.push({ step_id: step.id, description: step.description || `Step ${index + 1}`, output: previous });
     }
