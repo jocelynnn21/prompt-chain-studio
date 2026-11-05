@@ -11,6 +11,28 @@ function geminiText(payload: { candidates?: { content?: { parts?: { text?: strin
   return payload.candidates?.[0]?.content?.parts?.map(part => part.text ?? "").join("\n").trim() || "";
 }
 
+async function generateWithGemini(apiKey: string, model: string, systemInstruction: string, prompt: string, temperature: number | null) {
+  const models = model === "gemini-3.1-flash-lite" ? [model] : [model, "gemini-3.1-flash-lite"];
+  let lastError = "Gemini generation failed.";
+  for (const candidate of models) {
+    const result = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${candidate}:generateContent`, {
+      method: "POST",
+      headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: systemInstruction }] },
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: { maxOutputTokens: 1000, ...(temperature !== null ? { temperature } : {}) },
+      }),
+      signal: AbortSignal.timeout(45000),
+    });
+    const payload = await result.json();
+    if (result.ok) return geminiText(payload);
+    lastError = payload.error?.message || lastError;
+    if (result.status !== 429 && result.status !== 503 && !/high demand|overloaded/i.test(lastError)) break;
+  }
+  throw new Error(lastError);
+}
+
 export async function POST(request: Request) {
   const { supabase, user, authorized } = await getSuperadmin();
   if (!user) return Response.json({ error: "Sign in required." }, { status: 401 });
@@ -56,19 +78,13 @@ export async function POST(request: Request) {
         : model.startsWith("google/gemini-") ? model.slice("google/".length)
         : null;
       if (geminiKey && !imageUrl && directGeminiModel && /^gemini-[a-z0-9.-]+$/i.test(directGeminiModel)) {
-        const result = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${directGeminiModel}:generateContent`, {
-          method: "POST",
-          headers: { "x-goog-api-key": geminiKey, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: step.llm_system_prompt || "Follow the user's instructions precisely. Return only the requested result." }] },
-            contents: [{ role: "user", parts: [{ text: promptText }] }],
-            generationConfig: { maxOutputTokens: 1000, ...(step.llm_temperature !== null ? { temperature: step.llm_temperature } : {}) },
-          }),
-          signal: AbortSignal.timeout(45000),
-        });
-        const payload = await result.json();
-        if (!result.ok) throw new Error(payload.error?.message || `Generation failed at step ${index + 1}.`);
-        previous = geminiText(payload);
+        previous = await generateWithGemini(
+          geminiKey,
+          directGeminiModel,
+          step.llm_system_prompt || "Follow the user's instructions precisely. Return only the requested result.",
+          promptText,
+          step.llm_temperature,
+        );
       } else {
         if (!gatewayToken) throw new Error("This step requires AI Gateway authentication. Use a Gemini model with text input to use GEMINI_API_KEY.");
         const result = await fetch("https://ai-gateway.vercel.sh/v1/responses", {
