@@ -29,7 +29,7 @@ export async function POST(request: Request) {
   const { data: models } = modelIds.length
     ? await supabase.from("llm_models").select("id,provider_model_id").in("id", modelIds)
     : { data: [] as { id: number; provider_model_id: string }[] };
-  const gatewayToken = process.env.AI_GATEWAY_API_KEY || process.env.VERCEL_OIDC_TOKEN;
+  const gatewayToken = process.env.AI_GATEWAY_API_KEY || request.headers.get("x-vercel-oidc-token") || process.env.VERCEL_OIDC_TOKEN;
   if (!gatewayToken) return Response.json({ error: "AI Gateway authentication is not configured on this deployment." }, { status: 503 });
   const { data: run, error: runError } = await supabase.from("prompt_chain_runs").insert({ humor_flavor_id: chainId, profile_id: user.id, input_text: text || null, input_image_url: imageUrl || null }).select("id").single();
   if (runError || !run) return Response.json({ error: runError?.message ?? "Could not create run." }, { status: 500 });
